@@ -1,6 +1,6 @@
 """Model steering operations for bias response curves."""
 
-from typing import Iterable, List
+from typing import Iterable, List, Union
 import torch
 from transformer_lens import HookedTransformer
 
@@ -10,7 +10,7 @@ from transformer_lens import HookedTransformer
 @torch.no_grad()
 def get_steered_logits(
     model: HookedTransformer,
-    prompt: str,
+    prompt: Union[str, List[str]],
     steer_vec: torch.Tensor,
     alpha: float,
     inject_hook_name: str,
@@ -22,11 +22,19 @@ def get_steered_logits(
     steer_all_tokens: bool = True,
 ) -> torch.Tensor:
     """
-    Returns: Logits for the last token of the prompt after steering.
+    Returns: Logits for the last token of each prompt after steering.
+    If single prompt: shape [vocab_size]
+    If multiple prompts: shape [n_prompts, vocab_size]
     """
 
     tokens = model.to_tokens(prompt, prepend_bos=prepend_bos).to(device)
-    last_idx = tokens.shape[1] - 1
+    # Handle both single prompt (shape [1, seq_len]) and multiple prompts (shape [n_prompts, seq_len])
+    is_single_prompt = isinstance(prompt, str)
+    if is_single_prompt:
+        last_idx = tokens.shape[1] - 1
+    else:
+        last_idx = tokens.shape[1] - 1  # Same for all prompts in batch
+
     cache: dict[str, torch.Tensor] = {}
 
     def do_steer(act: torch.Tensor, hook) -> torch.Tensor:  # type: ignore[no-redef]
@@ -51,8 +59,15 @@ def get_steered_logits(
     )
 
     resid = model.ln_final(cache["resid"][:, last_idx : last_idx + 1, :])
-    logits = model.unembed(resid)[0, 0, :]
-    return logits
+    # For multiple prompts, resid shape is [n_prompts, 1, hidden_dim]
+    # For single prompt, resid shape is [1, 1, hidden_dim]
+    all_logits = model.unembed(resid)  # Shape: [n_prompts, 1, vocab_size] or [1, 1, vocab_size]
+
+    # Squeeze out the sequence dimension and return appropriate shape
+    if is_single_prompt:
+        return all_logits[0, 0, :]  # Shape: [vocab_size]
+    else:
+        return all_logits[:, 0, :]  # Shape: [n_prompts, vocab_size]
 
 
 @torch.no_grad()
@@ -60,7 +75,7 @@ def sweep_alpha(
     model: HookedTransformer,
     vector: torch.Tensor,
     alpha_values: Iterable[float],
-    prompt: str,
+    prompt: Union[str, List[str]],
     inj_layer: int,
     read_layer: int,
     inject_hook_name: str,
@@ -70,7 +85,9 @@ def sweep_alpha(
     steer_all_tokens: bool = True,
 ) -> torch.Tensor:
     """
-    Returns a tensor of shape [n_alphas, vocab_size] with last-token logits
+    Returns a tensor with last-token logits for each alpha value.
+    Single prompt: shape [n_alphas, vocab_size]
+    Multiple prompts: shape [n_alphas, n_prompts, vocab_size]
     """
     out = []
     for alpha in alpha_values:
@@ -89,4 +106,6 @@ def sweep_alpha(
             steer_all_tokens=steer_all_tokens,
         )
         out.append(logits.to(device))
-    return torch.stack(out, dim=0)  # [n_alphas, vocab_size]
+
+    stacked = torch.stack(out, dim=0)
+    return stacked  # [n_alphas, vocab_size] or [n_alphas, n_prompts, vocab_size]

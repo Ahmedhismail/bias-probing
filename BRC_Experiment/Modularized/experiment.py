@@ -89,22 +89,29 @@ class Experiment:
                 # Accumulate per-prompt tensors for each vector type
                 accumulated_logits = {k: [] for k in vector_names}
 
-                for test_prompt in progress_tracker.track_test_prompts(self.test_prompts):
-                    for vector_name in progress_tracker.track_vector_types(vector_names):
-                        logits_alpha_vocab = sweep_alpha(
-                            self.model,
-                            vectors[vector_name],
-                            self.alpha_values,
-                            test_prompt,
-                            inj_layer,
-                            read_layer,
-                            inject_hook,
-                            read_hook,
-                            self.config.prepend_bos,
-                            self.device,
-                            self.config.steer_all_tokens,
-                        )
-                        accumulated_logits[vector_name].append(logits_alpha_vocab)
+                # Convert test_prompts to list for batch processing
+                all_test_prompts = list(self.test_prompts)
+
+                # Process all prompts at once for each vector type (much more efficient!)
+                for vector_name in progress_tracker.track_vector_types(vector_names):
+                    # sweep_alpha now returns [n_alphas, n_prompts, vocab_size]
+                    batch_logits = sweep_alpha(
+                        self.model,
+                        vectors[vector_name],
+                        self.alpha_values,
+                        all_test_prompts,  # Pass all prompts at once!
+                        inj_layer,
+                        read_layer,
+                        inject_hook,
+                        read_hook,
+                        self.config.prepend_bos,
+                        self.device,
+                        self.config.steer_all_tokens,
+                    )
+
+                    # Split batch into individual prompt tensors: [n_alphas, vocab_size] each
+                    prompt_logits = batch_logits.unbind(dim=1)  # List of [n_alphas, vocab_size] tensors
+                    accumulated_logits[vector_name].extend(prompt_logits)
 
                 # Average across prompts. [n_alphas, vocab_size] per vector
                 logits_by_vec = {vector_name: torch.stack(accumulated_logits[vector_name], dim=0).mean(dim=0) for vector_name in vector_names}
