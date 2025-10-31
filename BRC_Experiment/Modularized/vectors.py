@@ -3,6 +3,7 @@
 from typing import List
 import torch
 from transformer_lens import HookedTransformer
+from tqdm import tqdm
 
 from BRC_Experiment.Modularized.utils import unit_vector
 from BRC_Experiment.Modularized.cache import VectorCache
@@ -32,6 +33,7 @@ def build_vectors(
     inject_site: str,
     model_name: str = "",
     dataset: str = "",
+    batch_size: int = 16,
 ) -> dict[str, torch.Tensor]:
     """
     Build bias, random, and orthogonal steering vectors.
@@ -59,15 +61,51 @@ def build_vectors(
     if model_name and dataset:
         cached_vectors = cache.load(model_name, dataset, inj_layer, inject_site, device)
         if cached_vectors is not None:
-            print(f"USING CACHED VECTORS FOR {model_name}_{dataset}_layer{inj_layer}_{inject_site}")
+            tqdm.write(f"    ✓ Using cached vectors (layer {inj_layer})")
             return cached_vectors
     
-    # Compute vectors if not cached
-    print(f"Computing vectors for {model_name}_{dataset}_layer{inj_layer}_{inject_site}")
-    bias_vec = torch.stack([
-        residual_at_last_token(model, p_f, inj_layer, inject_site, prepend_bos, device) - residual_at_last_token(model, p_m, inj_layer, inject_site, prepend_bos, device)
-        for (p_f, p_m) in prompt_pairs
-    ]).mean(dim=0) # Average difference between all pairs
+    # Compute vectors if not cached - BATCHED
+    tqdm.write(f"    • Computing vectors for layer {inj_layer} (batch_size={batch_size}, {len(prompt_pairs)*2} prompts)")
+    
+    # Extract all prompts in batches
+    all_prompts = [p for pair in prompt_pairs for p in pair]  # Flatten pairs
+    all_activations = []
+    
+    for i in range(0, len(all_prompts), batch_size):
+        batch = all_prompts[i:i+batch_size]
+        tokens_list = [model.to_tokens(p, prepend_bos=prepend_bos) for p in batch]
+        max_len = max(t.shape[1] for t in tokens_list)
+        
+        padded_tokens = []
+        last_indices = []
+        for tokens in tokens_list:
+            seq_len = tokens.shape[1]
+            last_indices.append(seq_len - 1)
+            if seq_len < max_len:
+                padding = torch.zeros((1, max_len - seq_len), dtype=tokens.dtype, device=tokens.device)
+                tokens = torch.cat([tokens, padding], dim=1)
+            padded_tokens.append(tokens)
+        
+        batch_tokens = torch.cat(padded_tokens, dim=0).to(device)
+        cache_dict: dict[str, torch.Tensor] = {}
+        
+        def grab(activation: torch.Tensor, hook) -> torch.Tensor:
+            cache_dict["resid"] = activation.detach()
+            return activation
+        
+        _ = model.run_with_hooks(batch_tokens, return_type=None, stop_at_layer=inj_layer + 1, 
+                                fwd_hooks=[(f"blocks.{inj_layer}.{inject_site}", grab)])
+        
+        for j, last_idx in enumerate(last_indices):
+            all_activations.append(cache_dict["resid"][j, last_idx, :].clone())
+    
+    all_activations = torch.stack(all_activations)
+    
+    # Split back into positive and negative
+    positive_acts = all_activations[0::2]  # Even indices
+    negative_acts = all_activations[1::2]  # Odd indices
+    
+    bias_vec = (positive_acts - negative_acts).mean(dim=0) # Average difference between all pairs
 
     bias_vec = unit_vector(bias_vec)
     rand_vec = unit_vector(torch.randn_like(bias_vec))

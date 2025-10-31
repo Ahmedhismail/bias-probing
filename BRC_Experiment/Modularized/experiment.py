@@ -2,7 +2,12 @@ from __future__ import annotations
 import torch
 from BRC_Experiment.Modularized.config import ExperimentConfig
 from BRC_Experiment.Modularized.data import load_train_dataset, load_test_dataset
-from BRC_Experiment.Modularized.model import load_model, get_choice_token_ids
+from BRC_Experiment.Modularized.model import (
+    load_model, 
+    get_choice_token_ids, 
+    validate_hook_points, 
+    print_model_info
+)
 from BRC_Experiment.Modularized.plotting import plot_and_save_brc_curves
 from BRC_Experiment.Modularized.vectors import build_vectors
 from BRC_Experiment.Modularized.steering import sweep_alpha
@@ -17,13 +22,21 @@ class Experiment:
         self.progress_tracker = create_progress_tracker(enabled=self.config.show_progress)
         configure_determinism(self.config.seed) # Set seed for reproducibility
         self.device = get_device() # Get device for model
-        self.model = load_model(self.config.model_name, self.device, self.progress_tracker) # Load model with progress tracking
+        
+        # Load model with progress tracking
+        self.model = load_model(self.config.model_name, self.device, self.progress_tracker)
+        
+        # Print model information for user awareness
+        print_model_info(self.model, self.progress_tracker)
         
         # Load both train and test datasets
         self.train_prompt_pairs = load_train_dataset(self.config.dataset)
         self.test_prompts = load_test_dataset(self.config.dataset)
+        
+        self.progress_tracker.log(f"Loaded {len(self.train_prompt_pairs)} training pairs and {len(self.test_prompts)} test prompts", "success")
 
-        # Get choice token IDs (assuming all datasets use the same choice format)
+        # Get choice token IDs with validation (will raise ValueError if tokenization incompatible)
+        self.progress_tracker.log("Validating tokenization...", "info")
         self.choice1_id, self.choice2_id = get_choice_token_ids(self.model)
 
         # Build alpha range
@@ -32,7 +45,16 @@ class Experiment:
         # Get sequence of inject and read layers
         n_layers = self.model.cfg.n_layers # Get total number of layers in model
         self.inject_layers = (list(self.config.inject_layers) if self.config.inject_layers is not None else list(range(n_layers))) # If inject_layers is not specified, use all layers
-        self.read_layers = (list(self.config.read_layers) if self.config.read_layers is not None else list(range(n_layers))) # If read_layers is not specified, use all layers  
+        self.read_layers = (list(self.config.read_layers) if self.config.read_layers is not None else list(range(n_layers))) # If read_layers is not specified, use all layers
+        
+        # Validate hook points exist in model before running experiment
+        validate_hook_points(
+            self.model, 
+            self.config.inject_site, 
+            self.config.read_site,
+            self.inject_layers,
+            self.read_layers
+        )  
     
     def _get_metrics_to_run(self):
         """Determine which metrics to run based on config."""
@@ -52,7 +74,6 @@ class Experiment:
             return {self.config.metric: all_metrics[self.config.metric]}
 
 
-
     def run_experiment(self) -> None:
         # ====== PHASE 1: Setup and determine metrics to run ======
         metrics_to_run = self._get_metrics_to_run()
@@ -63,6 +84,9 @@ class Experiment:
         # Collect all metric data for global y-limits computation
         all_metric_data = {}  # metric_name -> list of all values
         all_results = []
+        progress_tracker.log(f"Batch size: {self.config.batch_size}", "info")
+        progress_tracker.log(f"Starting experiment: {len(self.inject_layers)} inject layers × {len(self.read_layers)} read layers × {len(self.test_prompts)} prompts", "info")
+        
         for inj_layer in progress_tracker.track_injection_layers(self.inject_layers):
 
             vectors = build_vectors(
@@ -74,6 +98,7 @@ class Experiment:
                 inject_site=self.config.inject_site,
                 model_name=self.config.model_name,
                 dataset=self.config.dataset,
+                batch_size=self.config.batch_size,
             ) # Build vectors for each inject_layer
 
             # Filter read layers that are greater than injection layer
@@ -84,30 +109,23 @@ class Experiment:
                 inject_hook = build_hook_name(inj_layer, self.config.inject_site)
                 read_hook = build_hook_name(read_layer, self.config.read_site)
 
-                # ====== PHASE 2a: Compute steered logits ======
-                # Average results across all test prompts for robust evaluation
-                # Accumulate per-prompt tensors for each vector type
+                # ====== PHASE 2a: Compute steered logits (batched by default) ======
                 accumulated_logits = {k: [] for k in vector_names}
-
-                for test_prompt in progress_tracker.track_test_prompts(self.test_prompts):
-                    for vector_name in progress_tracker.track_vector_types(vector_names):
-                        logits_alpha_vocab = sweep_alpha(
-                            self.model,
-                            vectors[vector_name],
-                            self.alpha_values,
-                            test_prompt,
-                            inj_layer,
-                            read_layer,
-                            inject_hook,
-                            read_hook,
-                            self.config.prepend_bos,
-                            self.device,
-                            self.config.steer_all_tokens,
+                batch_size = min(8, len(self.test_prompts))
+                batches = [self.test_prompts[i:i+batch_size] for i in range(0, len(self.test_prompts), batch_size)]
+                
+                for batch in progress_tracker.track_test_prompts(batches):
+                    for vector_name in vector_names:
+                        # sweep_alpha now handles batching automatically: [n_prompts, n_alphas, vocab_size]
+                        batch_logits = sweep_alpha(
+                            self.model, vectors[vector_name], self.alpha_values, batch,
+                            inj_layer, read_layer, inject_hook, read_hook,
+                            self.config.prepend_bos, self.device, self.config.steer_all_tokens
                         )
-                        accumulated_logits[vector_name].append(logits_alpha_vocab)
+                        accumulated_logits[vector_name].extend(batch_logits)
 
-                # Average across prompts. [n_alphas, vocab_size] per vector
-                logits_by_vec = {vector_name: torch.stack(accumulated_logits[vector_name], dim=0).mean(dim=0) for vector_name in vector_names}
+                # Average across prompts: [n_alphas, vocab_size]
+                logits_by_vec = {k: torch.stack(accumulated_logits[k]).mean(dim=0) for k in vector_names}
 
                 bias_logits   = logits_by_vec["bias"]
                 random_logits = logits_by_vec["random"]

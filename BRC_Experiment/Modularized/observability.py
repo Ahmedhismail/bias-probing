@@ -3,12 +3,13 @@
 from typing import Iterator, TypeVar, Sequence, Optional
 from tqdm import tqdm
 import contextlib
+import sys
 
 T = TypeVar('T')
 
 
 class ExperimentProgressTracker:
-    """Provides progress tracking for BRC experiments with nested loops."""
+    """Provides progress tracking for BRC experiments with cleaner output."""
     
     def __init__(self, show_progress: bool = True) -> None:
         """Initialize the progress tracker.
@@ -17,58 +18,65 @@ class ExperimentProgressTracker:
             show_progress: Whether to show progress bars. Set to False for silent mode.
         """
         self.show_progress = show_progress
-        self._main_pbar = None
-        self._current_layer_pbar = None
+        self._active_pbar = None
+    
+    def log(self, message: str, level: str = "info") -> None:
+        """Print a message that plays nicely with progress bars.
+        
+        Args:
+            message: The message to print
+            level: Message level (info, success, warning, error)
+        """
+        if not self.show_progress:
+            print(message)
+            return
+        
+        # Use tqdm.write to avoid conflicts with progress bars
+        prefix = {
+            "info": "ℹ",
+            "success": "✓",
+            "warning": "⚠",
+            "error": "✗"
+        }.get(level, "•")
+        
+        tqdm.write(f"{prefix} {message}")
     
     def track_injection_layers(self, inject_layers: Sequence[T], desc: str = "Processing injection layers") -> Iterator[T]:
-        """Track progress through injection layers."""
+        """Track progress through injection layers (outermost loop)."""
         if not self.show_progress:
             yield from inject_layers
             return
             
-        with tqdm(inject_layers, desc=desc, unit="layer", position=0, leave=True) as pbar:
-            self._main_pbar = pbar
+        with tqdm(inject_layers, desc=desc, unit="layer", leave=True, file=sys.stdout) as pbar:
+            self._active_pbar = pbar
             for layer in pbar:
-                pbar.set_postfix(layer=layer)
+                pbar.set_postfix(layer=layer, refresh=True)
                 yield layer
-            self._main_pbar = None
+            self._active_pbar = None
     
-    def track_read_layers(self, read_layers: Sequence[T], desc: str = "Processing read layers") -> Iterator[T]:
-        """Track progress through read layers for current injection layer."""
+    def track_read_layers(self, read_layers: Sequence[T], desc: str = "  ├─ Read layers") -> Iterator[T]:
+        """Track progress through read layers (inner loop)."""
         if not self.show_progress:
             yield from read_layers
             return
             
-        with tqdm(read_layers, desc=desc, unit="layer", position=1, leave=False) as pbar:
-            self._current_layer_pbar = pbar
+        with tqdm(read_layers, desc=desc, unit="layer", leave=False, file=sys.stdout) as pbar:
             for layer in pbar:
-                pbar.set_postfix(layer=layer)
+                pbar.set_postfix(layer=layer, refresh=True)
                 yield layer
-            self._current_layer_pbar = None
     
-    def track_vector_types(self, vector_types: Sequence[T], desc: str = "Processing vectors") -> Iterator[T]:
-        """Track progress through vector types for current layer combination."""
-        if not self.show_progress:
-            yield from vector_types
-            return
-
-        with tqdm(vector_types, desc=desc, unit="vector", position=2, leave=False) as pbar:
-            for vector_type in pbar:
-                pbar.set_postfix(type=vector_type)
-                yield vector_type
-
-    def track_test_prompts(self, test_prompts: Sequence[T], desc: str = "Processing test prompts") -> Iterator[T]:
-        """Track progress through test prompts for current layer combination."""
+    def track_test_prompts(self, test_prompts: Sequence[T], desc: str = "    └─ Evaluating") -> Iterator[T]:
+        """Track progress through test prompts/batches."""
         if not self.show_progress:
             yield from test_prompts
             return
 
-        with tqdm(test_prompts, desc=desc, unit="prompt", position=3, leave=False) as pbar:
-            for test_prompt in pbar:
-                # Show first 50 chars of prompt for context
-                prompt_preview = str(test_prompt)[:50] + "..." if len(str(test_prompt)) > 50 else str(test_prompt)
-                pbar.set_postfix(prompt=prompt_preview)
-                yield test_prompt
+        # Auto-detect batches (lists) vs individual prompts (strings)
+        unit_name = "batch" if (test_prompts and isinstance(test_prompts[0], list)) else "prompt"
+        
+        with tqdm(test_prompts, desc=desc, unit=unit_name, leave=False, file=sys.stdout) as pbar:
+            for item in pbar:
+                yield item
     
     def track_plotting(self, results: Sequence[T], desc: str = "Generating plots") -> Iterator[T]:
         """Track progress through plotting phase."""
@@ -76,22 +84,9 @@ class ExperimentProgressTracker:
             yield from results
             return
             
-        with tqdm(results, desc=desc, unit="plot", position=0, leave=True) as pbar:
+        with tqdm(results, desc=desc, unit="plot", leave=True, file=sys.stdout) as pbar:
             for result in pbar:
-                # Extract layer info for display if it's a dict
-                if isinstance(result, dict) and 'inj' in result and 'read' in result:
-                    pbar.set_postfix(inj=result['inj'], read=result['read'])
                 yield result
-    
-    def update_status(self, message: str) -> None:
-        """Update the status message of the current progress bar."""
-        if not self.show_progress:
-            return
-            
-        if self._current_layer_pbar is not None:
-            self._current_layer_pbar.set_description(message)
-        elif self._main_pbar is not None:
-            self._main_pbar.set_description(message)
     
     @contextlib.contextmanager
     def track_model_loading(self, model_name: str):
@@ -100,12 +95,11 @@ class ExperimentProgressTracker:
             yield
             return
             
-        with tqdm(total=100, desc=f"Loading model {model_name}", unit="step", position=0, leave=True) as pbar:
-            # Update progress at key stages
-            pbar.set_postfix(stage="Initializing")
+        with tqdm(total=100, desc=f"Loading {model_name}", unit="%", leave=True, file=sys.stdout, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{postfix}]') as pbar:
+            pbar.set_postfix_str("Initializing...")
             yield ModelLoadingProgress(pbar)
             pbar.update(100 - pbar.n)  # Complete the bar
-            pbar.set_postfix(stage="Complete")
+            pbar.set_postfix_str("Complete")
 
 
 class ModelLoadingProgress:
@@ -118,7 +112,7 @@ class ModelLoadingProgress:
         """Update progress by the given amount."""
         self.pbar.update(min(amount, 100 - self.pbar.n))
         if stage:
-            self.pbar.set_postfix(stage=stage)
+            self.pbar.set_postfix_str(stage)
 
 
 def create_progress_tracker(enabled: bool = True) -> ExperimentProgressTracker:

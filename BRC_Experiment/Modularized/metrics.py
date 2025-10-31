@@ -191,58 +191,14 @@ def kl_divergences(
     
     # Compute KL divergence in a single batched operation
     # KL divergence: D_KL(P||Q) = sum P(x) * log(P(x) / Q(x))
-    # Add small epsilon to avoid log(0)
+    # Add small epsilon to both numerator and denominator to avoid log(0) and division by 0
+    eps = 1e-10
+    baseline_probs_safe = torch.clamp(baseline_probs_batch, min=eps)
+    steered_probs_safe = torch.clamp(steered_probs_batch, min=eps)
+    
     kl_divs_batch = torch.sum(
-        baseline_probs_batch * torch.log(baseline_probs_batch / (steered_probs_batch + 1e-10)), 
+        baseline_probs_safe * torch.log(baseline_probs_safe / steered_probs_safe), 
         dim=-1
-    )  # [batch_size] [KL(P_0||P_-2), KL(P_0||P_-1), KL(P_0||P_0), KL(P_0||P_1), KL(P_0||P_2)]
+    )  
     
     return kl_divs_batch.tolist()
-
-
-#vault for now.
-# @torch.no_grad()
-# def top_k_analysis(
-#     logit_list: List[torch.Tensor],
-#     k: int = 10,
-#     tokenizer = None
-# ) -> List[Dict[str, Any]]:
-#     """
-#     Analyze top-k most likely tokens for qualitative inspection.
-    
-#     Provides concrete examples of distributional shifts beyond target pair.
-#     Excellent for intuition-building about steering side effects.
-    
-#     Args:
-#         logit_list: List of logit tensors from model forward passes
-#         k: Number of top tokens to analyze
-#         tokenizer: Optional tokenizer for decoding token IDs to strings
-    
-#     Returns:
-#         List of dictionaries containing top-k analysis for each alpha value
-#         schema: {"top_k_ids": [...], "top_k_probs": [...], "top_k_tokens": [...]}
-#     """
-#     analyses = []
-    
-#     for logits in logit_list:
-#         probs = torch.softmax(logits, dim=-1)
-#         top_k_probs, top_k_ids = torch.topk(probs, k)
-        
-#         analysis = {
-#             "top_k_ids": [int(token_id) for token_id in top_k_ids],
-#             "top_k_probs": [float(prob) for prob in top_k_probs],
-#         }
-        
-#         # Add decoded tokens if tokenizer provided
-#         if tokenizer is not None:
-#             try:
-#                 analysis["top_k_tokens"] = [
-#                     tokenizer.decode([token_id]) for token_id in analysis["top_k_ids"]
-#                 ]
-#             except Exception as e:
-#                 analysis["top_k_tokens"] = [f"<decode_error_{token_id}>" for token_id in analysis["top_k_ids"]]
-        
-#         analyses.append(analysis)
-    
-#     return analyses
-

@@ -60,7 +60,7 @@ def sweep_alpha(
     model: HookedTransformer,
     vector: torch.Tensor,
     alpha_values: Iterable[float],
-    prompt: str,
+    prompts: str | list[str],  # Now handles both single prompt AND batches!
     inj_layer: int,
     read_layer: int,
     inject_hook_name: str,
@@ -70,23 +70,60 @@ def sweep_alpha(
     steer_all_tokens: bool = True,
 ) -> torch.Tensor:
     """
-    Returns a tensor of shape [n_alphas, vocab_size] with last-token logits
+    Sweep alpha values with batching for efficiency.
+    
+    Args:
+        prompts: Single prompt (str) or list of prompts for batching
+    
+    Returns:
+        - If single prompt: [n_alphas, vocab_size]
+        - If batch: [n_prompts, n_alphas, vocab_size]
     """
-    out = []
-    for alpha in alpha_values:
-        alpha = float(alpha)
-        logits = get_steered_logits(
-            model=model,
-            prompt=prompt,
-            steer_vec=vector,
-            alpha=alpha,
-            inject_hook_name=inject_hook_name,
-            read_hook_name=read_hook_name,
-            inject_layer=inj_layer,
-            read_layer=read_layer,
-            prepend_bos=prepend_bos,
-            device=device,
-            steer_all_tokens=steer_all_tokens,
-        )
-        out.append(logits.to(device))
-    return torch.stack(out, dim=0)  # [n_alphas, vocab_size]
+    alpha_list = list(alpha_values)
+    is_single = isinstance(prompts, str)
+    prompt_list = [prompts] if is_single else prompts
+    
+    # Tokenize and pad
+    all_tokens = [model.to_tokens(p, prepend_bos=prepend_bos).to(device) for p in prompt_list]
+    max_len = max(t.shape[1] for t in all_tokens)
+    last_indices = [t.shape[1] - 1 for t in all_tokens]
+    
+    padded = [torch.cat([t, torch.zeros((1, max_len - t.shape[1]), dtype=t.dtype, device=device)], dim=1) 
+              if t.shape[1] < max_len else t for t in all_tokens]
+    prompt_tokens = torch.cat(padded, dim=0)  # [n_prompts, seq_len]
+    
+    # Replicate for alphas: [n_prompts * n_alphas, seq_len]
+    batch_tokens = prompt_tokens.repeat_interleave(len(alpha_list), dim=0)
+    alpha_tensor = torch.tensor(alpha_list, device=device, dtype=vector.dtype).repeat(len(prompt_list))
+    
+    cache: dict[str, torch.Tensor] = {}
+    
+    def do_steer(act: torch.Tensor, hook) -> torch.Tensor:
+        vec = vector.to(act.device)
+        for i, alpha in enumerate(alpha_tensor):
+            if steer_all_tokens:
+                act[i, :, :] += alpha * vec
+            else:
+                act[i, last_indices[i // len(alpha_list)], :] += alpha * vec
+        return act
+    
+    def do_read(act: torch.Tensor, hook) -> torch.Tensor:
+        cache["resid"] = act.detach().clone()
+        return act
+    
+    model.run_with_hooks(
+        batch_tokens, return_type=None,
+        stop_at_layer=max(inj_layer, read_layer) + 1,
+        fwd_hooks=[(inject_hook_name, do_steer), (read_hook_name, do_read)]
+    )
+    
+    # Extract logits per prompt
+    all_logits = []
+    for i, last_idx in enumerate(last_indices):
+        start, end = i * len(alpha_list), (i + 1) * len(alpha_list)
+        resid = cache["resid"][start:end, last_idx:last_idx+1, :]
+        logits = model.unembed(model.ln_final(resid))[:, 0, :]
+        all_logits.append(logits)
+    
+    result = torch.stack(all_logits, dim=0)
+    return result[0] if is_single else result

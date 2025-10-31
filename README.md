@@ -4,8 +4,10 @@ CBMAS is a modular, production-style refactor of a Bias-Repelling Control (BRC) 
 
 ## Features
 - Clean module boundaries: config, data, model, steering, plotting, experiment, CLI
-- **Multiple datasets**: Winogender (gender bias) and Reassurance (supportive responses)
-- **Multiple metrics**: Choose between `logit_diffs`, `prob_diffs`, or `compute_perplexity`
+- **Multiple datasets**: Winogender (gender bias), Reassurance (supportive responses), Deference, Satisficing, Sycophancy
+- **Multiple metrics**: `logit_diffs`, `prob_diffs`, `odds_ratios`, `rank_changes`, `compute_perplexity`, `kl_divergences`
+- **Model validation**: Automatic checks for tokenization and hook point compatibility
+- **Vector caching**: Smart caching system to avoid recomputation
 - Deterministic runs when possible (cuBLAS/CUDNN settings and seeds)
 - CLI to run experiments with configurable hyperparameters
 - Quick-start example in `main.py` for fast debugging
@@ -23,6 +25,62 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 If you need CUDA-enabled PyTorch, adjust the torch/torchvision/torchaudio wheels as per your system.
+
+## Model Compatibility
+
+### Validated Models
+The following models have been tested and work correctly:
+- ✅ `gpt2-small` (GPT-2 124M)
+- ✅ `gpt2-medium` (GPT-2 355M)
+- ✅ `gpt2-large` (GPT-2 774M)
+- ✅ `gpt2-xl` (GPT-2 1.5B)
+
+### Automatic Validation
+When you run an experiment, the system automatically validates:
+
+1. **Tokenization**: Checks that choice tokens ("A", "B") tokenize to single tokens
+   - If multi-token, experiment stops with clear error message
+   - Tries multiple variations (with/without leading space)
+
+2. **Hook Points**: Verifies that specified hook sites exist in the model
+   - Prints available hook sites if validation fails
+   - Example sites: `hook_resid_pre`, `hook_resid_mid`, `hook_resid_post`
+
+3. **Model Information**: Displays architecture details on startup
+   - Number of layers, hidden size, vocabulary size
+   - All available hook points
+
+### Testing New Models
+
+To test a different model (e.g., GPT-Neo, Pythia, LLaMA):
+
+```bash
+# The validation system will tell you if it's compatible
+python -m BRC_Experiment.Modularized.cli \
+  --model-name gpt-neo-125M \
+  --dataset reassurance \
+  --inject-layers 2 \
+  --read-layers 3 \
+  --alpha-start -2 --alpha-stop 2 --alpha-step 1
+```
+
+**If tokenization fails**: The model's tokenizer doesn't tokenize "A"/"B" as single tokens. You may need to:
+- Modify the dataset format
+- Use different choice markers
+
+**If hook validation fails**: The model uses different hook point names. You'll see:
+- List of available hook sites
+- Use `--inject-site` and `--read-site` flags with correct names
+
+### Hook Point Reference
+
+Common TransformerLens hook sites (availability varies by model):
+- `hook_resid_pre`: Before attention block
+- `hook_resid_mid`: After attention, before MLP (default inject)
+- `hook_resid_post`: After attention + MLP (default read)
+- `hook_attn_out`: Attention output
+- `hook_mlp_out`: MLP output
+- `hook_q_input`, `hook_k_input`, `hook_v_input`: Attention inputs
 
 ## Project Structure
 ```
@@ -108,13 +166,20 @@ python -m BRC_Experiment.Modularized.cli \
 ```
 
 **Available Datasets:**
-- `reassurance` (default): Supportive vs unsupportive responses - Choice1 vs Choice2
-- `winogender`: Gender bias analysis - He vs She
+- `reassurance` (default): Supportive vs unsupportive responses
+- `deference`: Authority bias (deferring to experts/authority figures)
+- `satisficing`: Good-enough bias (accepting satisfactory vs optimal solutions)
+- `sycophancy`: Agreement bias (agreeing with user's stated views)
+- `winogender`: Gender bias analysis (he vs she pronouns)
 
 **Available Metrics:**
-- `logit_diffs` (default): Raw logit differences Choice1 - Choice2
-- `prob_diffs`: Probability differences P(Choice1) - P(Choice2) (auto-scaled to % and log scale)
-- `compute_perplexity`: Perplexity for target token
+- `logit_diffs`: Raw logit differences (Choice1 - Choice2)
+- `prob_diffs`: Probability differences P(Choice1) - P(Choice2) (auto-scaled to %)
+- `odds_ratios`: Human-interpretable likelihood ratios (e^Δ)
+- `rank_changes`: Token rank positions in vocabulary
+- `compute_perplexity`: Model confidence/fluency measure
+- `kl_divergences`: Distribution shift from baseline
+- _(omit --metric to run all metrics at once)_
 
 **Layer Specifications:**
 - `all` (default): All layers 0 to n_layers-1
@@ -125,6 +190,17 @@ python -m BRC_Experiment.Modularized.cli \
 - The dataset `oskarvanderwal/winogender` is pulled automatically via `datasets`. Internet access is required the first time.
 - Figures are saved as PNG: `graphs/{dataset}/{model}/{metric}/injL{inj}/brc_{metric}_injL{inj}_{inject_site}_readL{read}_{read_site}.png`.
 - Determinism is best-effort due to CUDA/BLAS constraints.
+- **Vector caching**: Steering vectors are cached in `cache/vectors/{model}/{dataset}/` to avoid recomputation
+
+## Technical Documentation
+
+For detailed information about the codebase:
+- **[TECHNICAL_DOCS.md](TECHNICAL_DOCS.md)**: Complete internal reference guide
+  - Step-by-step experiment loop breakdown
+  - Full module and function reference
+  - Data flow diagrams
+  - Example execution trace with real values
+  - Quick lookup for all classes and functions
 
 ## Testing
 A pytest suite can be created to mock heavy dependencies. Example categories:

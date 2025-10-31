@@ -33,10 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--use-log-scale", action="store_true", 
                    help="Force log scale for plotting (automatically enabled for prob_diffs metric)")
     p.add_argument("--dataset", type=str, default="reassurance",
-                   choices=["winogender", "reassurance", "deference", "satisficing", "sycophancy"],
-                   help="Dataset to use: winogender (he/she bias), reassurance (supportive/unsupportive), deference (authority bias), satisficing (good-enough bias), or sycophancy (authority agreement bias)")
+                   choices=["reassurance", "deference", "satisficing", "sycophancy"],
+                   help="Dataset to use: reassurance (supportive/unsupportive), deference (authority bias), satisficing (good-enough bias), or sycophancy (authority agreement bias)")
     p.add_argument("--no-progress", action="store_true", 
                    help="Disable progress bars for silent execution")
+    p.add_argument("--batch-size", type=int, default=16,
+                   help="Batch size for GPU operations (default: 16, higher = faster but more VRAM)")
     return p
 
 
@@ -74,6 +76,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         use_log_scale=args.use_log_scale,
         dataset=args.dataset,
         show_progress=not args.no_progress,
+        batch_size=args.batch_size,
     )
     
     from BRC_Experiment.Modularized.experiment import Experiment    

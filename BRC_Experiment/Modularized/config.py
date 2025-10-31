@@ -38,5 +38,8 @@ class ExperimentConfig:
 
     # Whether to show progress bars during execution
     show_progress: bool = True
+    
+    # Batch size for GPU operations (higher = faster but more memory)
+    batch_size: int = 16
 
 
