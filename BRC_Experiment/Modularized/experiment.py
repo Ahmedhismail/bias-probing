@@ -14,6 +14,7 @@ from BRC_Experiment.Modularized.steering import sweep_alpha
 from BRC_Experiment.Modularized.metrics import logit_diffs, prob_diffs, compute_perplexity, odds_ratios, rank_changes, kl_divergences
 from BRC_Experiment.Modularized.utils import build_alpha_range, configure_determinism, get_device, build_hook_name
 from BRC_Experiment.Modularized.observability import create_progress_tracker
+from BRC_Experiment.Modularized.results_io import save_results_to_csv, save_metadata
 
 
 class Experiment:
@@ -80,6 +81,11 @@ class Experiment:
         progress_tracker = self.progress_tracker
         vector_names = ["bias", "random", "orth"]
         
+        # Save experiment metadata
+        if self.config.save_csv:
+            save_metadata(self.config.out_dir, self.config)
+            progress_tracker.log(f"Saved experiment metadata to {self.config.out_dir}/results/metadata.json", "success")
+        
         # ====== PHASE 2: Iterate through layer combinations and compute metrics ======
         # Collect all metric data for global y-limits computation
         all_metric_data = {}  # metric_name -> list of all values
@@ -88,6 +94,8 @@ class Experiment:
         progress_tracker.log(f"Starting experiment: {len(self.inject_layers)} inject layers × {len(self.read_layers)} read layers × {len(self.test_prompts)} prompts", "info")
         
         for inj_layer in progress_tracker.track_injection_layers(self.inject_layers):
+            # Track results for this inject layer (for CSV saving)
+            inject_layer_results = []
 
             vectors = build_vectors(
                 self.model,
@@ -111,7 +119,7 @@ class Experiment:
 
                 # ====== PHASE 2a: Compute steered logits (batched by default) ======
                 accumulated_logits = {k: [] for k in vector_names}
-                batch_size = min(8, len(self.test_prompts))
+                batch_size = min(self.config.batch_size, len(self.test_prompts))
                 batches = [self.test_prompts[i:i+batch_size] for i in range(0, len(self.test_prompts), batch_size)]
                 
                 for batch in progress_tracker.track_test_prompts(batches):
@@ -152,8 +160,23 @@ class Experiment:
                         # For scalar metrics, collect all values from all vectors
                         all_metric_data[metric_name].extend([*bias_results, *random_results, *orth_results])
                     
+                    # Store results for CSV saving (this inject layer only)
+                    inject_layer_results.append((read_layer, bias_results, random_results, orth_results, metric_name))
+                    
                     # Store all results for plotting
                     all_results.append((inj_layer, read_layer, bias_results, random_results, orth_results, metric_name))
+            
+            # ====== Save CSV for this inject layer ======
+            if self.config.save_csv and inject_layer_results:
+                csv_path = save_results_to_csv(
+                    inject_layer_results,
+                    self.alpha_values,
+                    self.config.out_dir,
+                    self.config.model_name,
+                    self.config.dataset,
+                    inj_layer
+                )
+                progress_tracker.log(f"Saved results for inject layer {inj_layer} to {csv_path.name}", "success")
         
         # ====== PHASE 3: Compute global y-limits for all metrics ======
         global_y_limits = {}

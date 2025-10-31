@@ -41,5 +41,8 @@ class ExperimentConfig:
     
     # Batch size for GPU operations (higher = faster but more memory)
     batch_size: int = 16
+    
+    # Whether to save CSV results after each inject layer
+    save_csv: bool = True
 
 

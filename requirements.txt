@@ -2,9 +2,9 @@
 numpy>=1.23,<2.0  # Compatible with torchvision requirement (numpy<2) and matplotlib (numpy>=1.23)
 matplotlib==3.9.2
 
-torch==2.4.0
-torchvision==0.19.0
-torchaudio==2.4.0
+torch>=2.8.0
+torchvision>=0.23.0
+torchaudio>=2.8.0
 
 transformers==4.44.2
 datasets==2.20.0
@@ -15,5 +15,7 @@ typeguard==2.13.3  # Required by jaxtyping 0.2.33
 
 pandas==2.2.2
 tqdm==4.66.4
+hf_transfer==0.1.9
+python-dotenv==1.2.1
 
 pytest==8.3.2

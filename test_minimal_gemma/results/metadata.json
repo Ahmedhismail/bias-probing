@@ -1,0 +1,16 @@
+{
+  "model_name": "google/gemma-2b",
+  "dataset": "reassurance",
+  "inject_site": "hook_resid_mid",
+  "read_site": "hook_resid_post",
+  "alpha_start": -10.0,
+  "alpha_stop": 10.0,
+  "alpha_step": 0.5,
+  "inject_layers": null,
+  "read_layers": null,
+  "seed": 42,
+  "batch_size": 24,
+  "prepend_bos": true,
+  "steer_all_tokens": true,
+  "metric": null
+}

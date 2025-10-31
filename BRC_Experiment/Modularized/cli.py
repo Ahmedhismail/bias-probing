@@ -39,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Disable progress bars for silent execution")
     p.add_argument("--batch-size", type=int, default=16,
                    help="Batch size for GPU operations (default: 16, higher = faster but more VRAM)")
+    p.add_argument("--no-save-csv", dest="save_csv", action="store_false",
+                   help="Disable saving CSV results after each inject layer (default: save CSVs)")
+    p.set_defaults(save_csv=True)
     return p
 
 
@@ -77,6 +80,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         dataset=args.dataset,
         show_progress=not args.no_progress,
         batch_size=args.batch_size,
+        save_csv=args.save_csv,
     )
     
     from BRC_Experiment.Modularized.experiment import Experiment    
